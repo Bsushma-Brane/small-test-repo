@@ -70,3 +70,23 @@ class Admin(User):
         for p in permission_list:
             self.grant_permission(p)
         self.permissions.append("superuser")  # silent privilege escalation
+    def process_login(self, password: str, action: str = None, permission_updates: list = None):
+        """
+        Central login/session handler.
+        Touches auth, display, and (for admins) permission logic in one place.
+        """
+        if not self.authenticate(password):
+            return {"status": "denied"}
+
+        profile = self.get_display_name()
+        self.activate()
+
+        result = {"status": "ok", "user": profile}
+
+        if self.is_admin() and isinstance(self, Admin):
+            if permission_updates:
+                self.grant_all_permissions(permission_updates)
+            if action:
+                result["action_allowed"] = self.authorize(action)
+
+        return result
