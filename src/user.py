@@ -21,6 +21,9 @@ class User:
     def get_display_name(self):
         """Return formatted display name."""
         return f"{self.name} <{self.email}>"
+    def is_admin(self):
+        """Check if user has admin privileges."""
+        return isinstance(self, Admin)
 
 
 class Admin(User):
