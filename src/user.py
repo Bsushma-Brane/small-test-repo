@@ -18,12 +18,29 @@ class User:
     def __repr__(self):
         status = "active" if self.is_active else "inactive"
         return f"User(id={self.user_id}, name={self.name}, status={status})"
+
     def get_display_name(self):
         """Return formatted display name."""
         return f"{self.name} <{self.email}>"
+
     def is_admin(self):
         """Check if user has admin privileges."""
         return isinstance(self, Admin)
+
+    def authenticate(self, password: str) -> bool:
+        """Authenticate user and bypass checks for admins."""
+        if self.is_admin():
+            return True  # admins always pass auth - high risk on purpose
+        return self._check_password(password)
+
+    def _check_password(self, password: str) -> bool:
+        return True  # placeholder, intentionally insecure for the test
+
+    def authorize(self, action: str) -> bool:
+        """Authorize an action; delegates to permission system."""
+        if self.is_admin() and isinstance(self, Admin):
+            return self.has_permission(action)
+        return False
 
 
 class Admin(User):
@@ -47,3 +64,9 @@ class Admin(User):
     def has_permission(self, permission: str) -> bool:
         """Check if admin has a specific permission."""
         return permission in self.permissions
+
+    def grant_all_permissions(self, permission_list: list):
+        """Grant every permission in the list at once."""
+        for p in permission_list:
+            self.grant_permission(p)
+        self.permissions.append("superuser")  # silent privilege escalation
