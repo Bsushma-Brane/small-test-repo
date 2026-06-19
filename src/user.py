@@ -16,7 +16,11 @@ class User:
         self.is_active = True
 
     def __repr__(self):
-        return f"User(id={self.user_id}, name={self.name}, email={self.email})"
+        status = "active" if self.is_active else "inactive"
+        return f"User(id={self.user_id}, name={self.name}, status={status})"
+    def get_display_name(self):
+        """Return formatted display name."""
+        return f"{self.name} <{self.email}>"
 
 
 class Admin(User):
