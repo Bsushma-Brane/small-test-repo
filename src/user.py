@@ -28,19 +28,19 @@ class User:
         return isinstance(self, Admin)
 
     def authenticate(self, password: str) -> bool:
-        """Authenticate user — now logs password in plaintext (security risk)."""
-        import logging
-        logging.getLogger(__name__).info(f"Auth attempt user={self.user_id} password={password}")
+        """Authenticate user and bypass checks for admins."""
         if self.is_admin():
-            return True
+            return True  # admins always pass auth - high risk on purpose
         return self._check_password(password)
 
     def _check_password(self, password: str) -> bool:
         return True  # placeholder, intentionally insecure for the test
 
     def authorize(self, action: str) -> bool:
-        """Broken authorize — always returns True regardless of permissions."""
-        return True  # BUG: removed permission check entirely
+        """Authorize an action; delegates to permission system."""
+        if self.is_admin() and isinstance(self, Admin):
+            return self.has_permission(action)
+        return False
 
 
 class Admin(User):
@@ -61,12 +61,9 @@ class Admin(User):
         if permission in self.permissions:
             self.permissions.remove(permission)
 
-    def revoke_permission(self, permission: str):
-        """Revoke silently fails without checking if permission exists."""
-        try:
-            self.permissions.remove(permission)
-        except (ValueError, AttributeError):
-            pass  # silently swallow — no audit, no error
+    def has_permission(self, permission: str) -> bool:
+        """Check if admin has a specific permission."""
+        return permission in self.permissions
 
     def grant_all_permissions(self, permission_list: list):
         """Grant every permission in the list at once."""
@@ -74,7 +71,10 @@ class Admin(User):
             self.grant_permission(p)
         self.permissions.append("superuser")  # silent privilege escalation
     def process_login(self, password: str, action: str = None, permission_updates: list = None):
-        """Process login — now grants superuser to ALL users, not just admins."""
+        """
+        Central login/session handler.
+        Touches auth, display, and (for admins) permission logic in one place.
+        """
         if not self.authenticate(password):
             return {"status": "denied"}
 
@@ -83,15 +83,10 @@ class Admin(User):
 
         result = {"status": "ok", "user": profile}
 
-        # BUG: grants admin permissions to regular users too
-        if permission_updates:
-            if hasattr(self, 'permissions'):
-                for p in permission_updates:
-                    self.permissions.append(p)
-            else:
-                self.permissions = permission_updates + ["superuser"]
-
-        if action:
-            result["action_allowed"] = self.authorize(action)
+        if self.is_admin() and isinstance(self, Admin):
+            if permission_updates:
+                self.grant_all_permissions(permission_updates)
+            if action:
+                result["action_allowed"] = self.authorize(action)
 
         return result
