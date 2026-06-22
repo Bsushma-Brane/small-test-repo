@@ -3,8 +3,6 @@ name: Code Review Graph Analysis
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -14,12 +12,176 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout PR code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run code-review-graph analysis
+      # ── Step 1: Existing code-review-graph risk analysis ──────────────────
+      - name: Run code-review-graph
         uses: tirth8205/code-review-graph@v2.3.6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Step 2: Qwen AI Analysis + Test Cases ─────────────────────────────
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Qwen AI Analysis + Test Cases
+        env:
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          PR_NUMBER:    ${{ github.event.pull_request.number }}
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pip install -q code-review-graph openai
+          git fetch origin ${{ github.base_ref }}
+          code-review-graph build
+          code-review-graph detect-changes --base "origin/${{ github.base_ref }}" > /tmp/crg-report.json || echo "{}" > /tmp/crg-report.json
+
+          python - <<'PYEOF'
+          import json, os
+          from openai import OpenAI
+
+          # ── Load report ───────────────────────────────────────────────────
+          report     = json.load(open("/tmp/crg-report.json"))
+          api_key    = os.environ.get("QWEN_API_KEY", "")
+          pr_number  = os.environ.get("PR_NUMBER", "")
+          repo       = os.environ.get("GITHUB_REPOSITORY", "")
+          token      = os.environ.get("GH_TOKEN", "")
+
+          if not api_key:
+              print("No QWEN_API_KEY — skipping Qwen analysis")
+              exit(0)
+
+          # ── Extract data from report ──────────────────────────────────────
+          score    = float(report.get("risk_score") or 0)
+          changed  = report.get("changed_functions") or []
+          gaps     = report.get("test_gaps") or []
+          flows    = report.get("affected_flows") or []
+          top10    = (report.get("review_priorities") or changed)[:10]
+
+          func_lines = "\n".join(
+              f"  - {fn.get('qualified_name') or fn.get('name')}  "
+              f"({fn.get('file_path') or fn.get('file')}  "
+              f"L{fn.get('line_start')}-{fn.get('line_end')})  "
+              f"risk={float(fn.get('risk_score') or 0):.2f}"
+              for fn in top10
+          )
+          gap_lines = "\n".join(
+              f"  - {g.get('qualified_name') or g.get('name')} "
+              f"({g.get('file_path') or g.get('file')})"
+              for g in gaps[:10]
+          )
+
+          # Read raw source of changed files for deeper analysis
+          raw_sources = {}
+          for fn in top10:
+              fp = fn.get("file_path") or fn.get("file") or ""
+              if fp and fp not in raw_sources:
+                  try:
+                      raw_sources[fp] = open(fp).read()[:3000]
+                  except Exception:
+                      pass
+
+          source_block = "\n\n".join(
+              f"### {fp}\n```python\n{src}\n```"
+              for fp, src in list(raw_sources.items())[:3]
+          )
+
+          # ── Prompt ────────────────────────────────────────────────────────
+          prompt = f"""You are a senior software architect reviewing a Pull Request.
+
+The code-review-graph tool analysed this PR and found:
+- Overall risk score: {score:.2f} (0=low, 1=high)
+- Changed functions ({len(changed)} total):
+{func_lines or "  none"}
+- Test gaps (functions with no test coverage):
+{gap_lines or "  none"}
+- Affected execution flows: {len(flows)}
+
+Changed source code:
+{source_block or "  (source not available)"}
+
+Write a detailed PR review with EXACTLY these sections:
+
+## 🤖 Qwen AI Functional Analysis
+
+### 📋 What Changed
+(Explain what each changed function does and why it matters)
+
+### ⚠️ Potential Risks
+(Identify security issues, logic bugs, edge cases, breaking changes)
+
+### 💥 Blast Radius
+(Which parts of the system are affected by these changes)
+
+### 🧪 Recommended Test Cases
+(Write 3-5 specific unittest examples with actual assertions for the riskiest functions)
+
+### ✅ Verdict
+(APPROVE / REQUEST CHANGES / NEEDS REVIEW — with one line reason)
+
+Be specific and reference actual function names and line numbers. Keep under 700 words."""
+
+          # ── Call Qwen via OpenRouter ───────────────────────────────────────
+          client = OpenAI(
+              api_key=api_key,
+              base_url="https://openrouter.ai/api/v1"
+          )
+
+          MODELS = [
+              "qwen/qwen3-coder:free",
+              "meta-llama/llama-3.3-70b-instruct:free",
+              "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
+          ]
+
+          analysis = None
+          import time
+          for model in MODELS:
+              for attempt in range(3):
+                  try:
+                      print(f"Trying model: {model} attempt {attempt+1}")
+                      resp = client.chat.completions.create(
+                          model=model,
+                          messages=[
+                              {"role": "system", "content": "You are a senior software architect. Be concise and specific."},
+                              {"role": "user",   "content": prompt}
+                          ],
+                          temperature=0.3,
+                          max_tokens=1500
+                      )
+                      analysis = resp.choices[0].message.content.strip()
+                      print(f"Success with model: {model}")
+                      break
+                  except Exception as e:
+                      print(f"  Error on {model}: {e}")
+                      if "429" in str(e):
+                          time.sleep(35)
+                      else:
+                          break
+              if analysis:
+                  break
+
+          if not analysis:
+              analysis = "⚠️ Qwen AI analysis could not be completed (all models rate limited). Please retry."
+
+          # ── Post comment to PR ────────────────────────────────────────────
+          import urllib.request
+          comment_body = f"<!-- qwen-analysis -->\n{analysis}\n\n---\n*Powered by Qwen AI (OpenRouter) + code-review-graph*"
+
+          post_req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+              data=json.dumps({"body": comment_body}).encode(),
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept":        "application/vnd.github+json",
+                  "Content-Type":  "application/json"
+              },
+              method="POST"
+          )
+          with urllib.request.urlopen(post_req) as r:
+              result = json.loads(r.read())
+              print(f"Qwen comment posted: {result.get('html_url')}")
+          PYEOF
