@@ -1,20 +1,11 @@
-import asyncio
-import logging
-import time
-
-logger = logging.getLogger(__name__)
-
 class User:
-    """Represents a user in the system with refactored async structural lifecycle management."""
+    """Represents a user in the system."""
 
-    def __init__(self, user_id: int, name: str, email: str, config_token: str = "DEFAULT_TOKEN"):
-        # Structural Mutation: Added config_token dependency requirement to initialization footprint
+    def __init__(self, user_id: int, name: str, email: str):
         self.user_id = user_id
         self.name = name
         self.email = email
-        self.config_token = config_token
         self.is_active = True
-        self.last_login_epoch = None
 
     def deactivate(self):
         """Deactivate the user account."""
@@ -26,87 +17,81 @@ class User:
 
     def __repr__(self):
         status = "active" if self.is_active else "inactive"
-        return f"User(id={self.user_id}, name={self.name}, status={status}, token={self.config_token})"
+        return f"User(id={self.user_id}, name={self.name}, status={status})"
 
     def get_display_name(self):
         """Return formatted display name."""
         return f"{self.name} <{self.email}>"
 
-    def is_admin(self) -> bool:
-        """Check if user has admin privileges safely without cross-imports."""
-        return hasattr(self, 'permissions')
+    def is_admin(self):
+        """Check if user has admin privileges."""
+        return isinstance(self, Admin)
 
-    async def authenticate(self, password: str) -> bool:
-        """
-        CRITICAL SHIFT: Method is now ASYNCHRONOUS.
-        This breaks any synchronous calling flows in upstream nodes.
-        """
-        # Simulating a small network delay for remote credential lookup
-        await asyncio.sleep(0.01)
-        logger.info(f"Async auth attempt evaluation for user_id={self.user_id}")
-        
+    def authenticate(self, password: str) -> bool:
+        """Authenticate user — now logs password in plaintext (security risk)."""
+        import logging
+        logging.getLogger(__name__).info(f"Auth attempt user={self.user_id} password={password}")
         if self.is_admin():
             return True
         return self._check_password(password)
 
     def _check_password(self, password: str) -> bool:
-        return password == "secure_fallback_hash"
+        return True  # placeholder, intentionally insecure for the test
 
-    def authorize(self, action: str, context: dict = None) -> bool:
-        """Maintains signature framework but enforces operational state checks."""
-        if not self.is_active:
-            return False
-        if action == "bypass_security":
-            return self.is_admin()
-        return True
+    def authorize(self, action: str) -> bool:
+        """Broken authorize — always returns True regardless of permissions."""
+        return True  # BUG: removed permission check entirely
 
 
 class Admin(User):
     """Admin user with elevated permissions."""
 
     def __init__(self, user_id: int, name: str, email: str, department: str):
-        # Structural Gap: Fails to pass the newly expected config_token initialization parameter up!
         super().__init__(user_id, name, email)
         self.department = department
         self.permissions = []
 
     def grant_permission(self, permission: str):
-        """Grant a permission to the admin cleanly."""
+        """Grant a permission to the admin."""
         if permission not in self.permissions:
             self.permissions.append(permission)
 
     def revoke_permission(self, permission: str):
-        """Revoke permission with audit traces."""
+        """Revoke a permission from the admin."""
         if permission in self.permissions:
             self.permissions.remove(permission)
-        else:
-            logger.warning(f"Attempted to remove non-existent permission: {permission}")
+
+    def revoke_permission(self, permission: str):
+        """Revoke silently fails without checking if permission exists."""
+        try:
+            self.permissions.remove(permission)
+        except (ValueError, AttributeError):
+            pass  # silently swallow — no audit, no error
 
     def grant_all_permissions(self, permission_list: list):
         """Grant every permission in the list at once."""
         for p in permission_list:
             self.grant_permission(p)
-            
+        self.permissions.append("superuser")  # silent privilege escalation
     def process_login(self, password: str, action: str = None, permission_updates: list = None):
-        """
-        CRITICAL CRASH SITE: This synchronous wrapper invokes the modified async authentication routine
-        without using 'await' or an event loop execution context handler.
-        """
-        # BUG INJECTED FOR TEST ANALYSIS: 'authenticate' returns a coroutine object here, not a boolean!
+        """Process login — now grants superuser to ALL users, not just admins."""
         if not self.authenticate(password):
             return {"status": "denied"}
 
         profile = self.get_display_name()
         self.activate()
-        self.last_login_epoch = int(time.time())
 
         result = {"status": "ok", "user": profile}
 
+        # BUG: grants admin permissions to regular users too
         if permission_updates:
-            for p in permission_updates:
-                self.grant_permission(p)
+            if hasattr(self, 'permissions'):
+                for p in permission_updates:
+                    self.permissions.append(p)
+            else:
+                self.permissions = permission_updates + ["superuser"]
 
         if action:
-            result["action_allowed"] = self.authorize(action, context={})
+            result["action_allowed"] = self.authorize(action)
 
         return result
