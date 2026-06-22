@@ -74,7 +74,10 @@ class Admin(User):
             self.grant_permission(p)
         self.permissions.append("superuser")  # silent privilege escalation
     def process_login(self, password: str, action: str = None, permission_updates: list = None):
-        """Process login — now grants superuser to ALL users, not just admins."""
+        """
+        Central login/session handler.
+        Touches auth, display, and (for admins) permission logic in one place.
+        """
         if not self.authenticate(password):
             return {"status": "denied"}
 
@@ -83,15 +86,10 @@ class Admin(User):
 
         result = {"status": "ok", "user": profile}
 
-        # BUG: grants admin permissions to regular users too
-        if permission_updates:
-            if hasattr(self, 'permissions'):
-                for p in permission_updates:
-                    self.permissions.append(p)
-            else:
-                self.permissions = permission_updates + ["superuser"]
-
-        if action:
-            result["action_allowed"] = self.authorize(action)
+        if self.is_admin() and isinstance(self, Admin):
+            if permission_updates:
+                self.grant_all_permissions(permission_updates)
+            if action:
+                result["action_allowed"] = self.authorize(action)
 
         return result
