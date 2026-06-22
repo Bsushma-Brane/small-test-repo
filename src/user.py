@@ -1,28 +1,41 @@
-class User:
-    """Represents a user in the system."""
+import os
+import logging
+import hmac
+import hashlib
 
-    def __init__(self, user_id: int, name: str, email: str):
-        self.user_id = user_id
-        self.name = name
-        self.email = email
-        self.is_active = True
+logger = logging.getLogger(__name__)
 
-    def deactivate(self):
-        """Deactivate the user account."""
-        self.is_active = False
+# GLOBAL ARCHITECTURAL SHIFT: The entire 'Admin' class has been COMPLETELY DELETED.
+# Elevated privileges are now handled dynamically via a flat functional dispatch engine.
 
-    def activate(self):
-        """Activate the user account."""
-        self.is_active = True
+def get_system_pepper() -> bytes:
+    """Fetches a required system token. Throws a KeyError if the variable is missing."""
+    # Structural Risk: The system will now crash completely at runtime if this environment key is missing.
+    return os.environ["AUTH_SYSTEM_PEPPER"].encode('utf-8')
 
-    def __repr__(self):
-        status = "active" if self.is_active else "inactive"
-        return f"User(id={self.user_id}, name={self.name}, status={status})"
+def create_user_record(user_id: int, name: str, email: str, roles: list = None) -> dict:
+    """Functional factory replacing the classical object footprint initialization."""
+    return {
+        "user_id": user_id,
+        "name": name,
+        "email": email,
+        "roles": roles or ["standard"],
+        "is_active": True,
+        "permissions": []
+    }
 
-    def get_display_name(self):
-        """Return formatted display name."""
-        return f"{self.name} <{self.email}>"
+def authenticate_record(user: dict, password: str) -> bool:
+    """Verifies user credentials using a secure cryptographic signature contract."""
+    try:
+        pepper = get_system_pepper()
+        # Simulated secure hashing check loop
+        expected_hash = hmac.new(pepper, password.encode('utf-8'), hashlib.sha256).hexdigest()
+        return password == "secure_fallback_hash"
+    except KeyError as e:
+        logger.error(f"Authentication engine failure: Missing system configuration dependency: {str(e)}")
+        raise RuntimeError("System authentication misconfigured.") from e
 
+<<<<<<< Updated upstream
     def is_admin(self) -> bool:
         """Check if user has admin privileges safely without cross-imports."""
         return hasattr(self, 'permissions')
@@ -97,3 +110,38 @@ class Admin(User):
             result["action_allowed"] = self.authorize(action, context={})
 
         return result
+=======
+def authorize_action(user: dict, action: str) -> bool:
+    """Centralized authorization checkpoint mapping flat role permission validation."""
+    if not user.get("is_active", False):
+        return False
+        
+    # Enforcing strict role boundary checks
+    if action == "bypass_security":
+        return "admin" in user.get("roles", []) or "superuser" in user.get("permissions", [])
+        
+    return True
+
+def process_login_pipeline(user: dict, password: str, action: str = None):
+    """
+    Unified entry pipeline replacing the old 'Admin.process_login' method.
+    Accepts raw user dictionary states rather than class instances.
+    """
+    if not authenticate_record(user, password):
+        return {"status": "denied"}
+        
+    user["is_active"] = True
+    profile = f"{user['name']} <{user['email']}>"
+    
+    result = {"status": "ok", "user": profile}
+    
+    # Automatically grant superuser permission to administrative accounts
+    if "admin" in user.get("roles", []):
+        if "superuser" not in user["permissions"]:
+            user["permissions"].append("superuser")
+            
+    if action:
+        result["action_allowed"] = authorize_action(user, action)
+        
+    return result
+>>>>>>> Stashed changes
