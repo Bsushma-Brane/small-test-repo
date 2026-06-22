@@ -1,11 +1,11 @@
 class User:
     """Represents a user in the system."""
 
-    # def __init__(self, user_id: int, name: str, email: str):
-    #     self.user_id = user_id
-    #     self.name = name
-    #     self.email = email
-    #     self.is_active = True
+    def __init__(self, user_id: int, name: str, email: str):
+        self.user_id = user_id
+        self.name = name
+        self.email = email
+        self.is_active = True
 
     def deactivate(self):
         """Deactivate the user account."""
