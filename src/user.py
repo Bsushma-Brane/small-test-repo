@@ -1,129 +1,141 @@
-from abc import ABC, abstractmethod
-from enum import Enum
+import os
+import time
+import hmac
+import hashlib
 import logging
-import re
+from typing import Dict, Any, Callable, List, TypeVar, Generic
 
 logger = logging.getLogger(__name__)
 
-class AccountTier(Enum):
-    STANDARD = "standard"
-    PREMIUM = "premium"
-    SYSTEM_ADMIN = "system_admin"
+T = TypeVar('T')
+
+class ImmutableStateEnvelope(Generic[T]):
+    """Enforces zero-mutation state tracking using cryptographic checksum locks."""
+    def __init__(self, data: T):
+        self._raw_data = data
+        self._checksum = self._calculate_signature(data)
+
+    def _calculate_signature(self, data: T) -> str:
+        secret = os.environ.get("STATE_ENVELOPE_SECRET", "fallback_signing_key_32_bytes").encode()
+        payload = str(data).encode()
+        return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+    def unpack_and_verify(self) -> T:
+        """Validates that the record state was not modified in transit or memory."""
+        if hmac.compare_digest(self._checksum, self._calculate_signature(self._raw_data)):
+            return self._raw_data
+        raise SecurityException("CRITICAL: Envelope tampering detected! State checksum failed validation.")
 
 
-class UserValidationError(Exception):
-    """Custom exception raised when domain object integrity rules are violated."""
+class SecurityException(Exception):
+    """Raised when isolation boundaries or state signatures fail validation."""
     pass
 
 
-class BaseIdentity(ABC):
-    """Abstract baseline class establishing core enterprise structure contracts."""
-    
-    @abstractmethod
-    def validate_lifecycle_state(self) -> bool:
-        """Enforces runtime validation of current object properties."""
-        pass
+class SystemEventChannel:
+    """Centralized, stateful Event Hub handling reactive data dispatch pipelines."""
+    def __init__(self):
+        self._subscribers: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
 
+    def subscribe(self, event_topic: str, callback_handler: Callable[[Dict[str, Any]], None]):
+        if event_topic not in self._subscribers:
+            self._subscribers[event_topic] = []
+        self._subscribers[event_topic].append(callback_handler)
 
-class User(BaseIdentity):
-    """Represents a standard core user profile entity using strict domain formatting."""
-
-    def __init__(self, user_id: int, username: str, email: str, tier: AccountTier = AccountTier.STANDARD):
-        self.user_id = user_id
-        self.username = username
-        self.email = email
-        self.tier = tier
-        self.is_suspended = False
-        self.security_clearance_level = 1
+    def dispatch(self, event_topic: str, payload: ImmutableStateEnvelope[Dict[str, Any]]):
+        """Unpacks the secure state and routes it to downstream listeners."""
+        verified_data = payload.unpack_and_verify()
+        logger.info(f"[EVENT ROUTER] Publishing to topic '{event_topic}'")
         
-        # Immediate self-validation check upon initialization
-        self.validate_lifecycle_state()
+        if event_topic in self._subscribers:
+            for handler in self._subscribers[event_topic]:
+                handler(verified_data)
 
-    def validate_lifecycle_state(self) -> bool:
-        """Validates structural properties. Throws an error if rules are breached."""
-        if not isinstance(self.user_id, int) or self.user_id <= 0:
-            raise UserValidationError("Invalid structural attribute: user_id must be a positive integer.")
-            
-        email_regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-        if not re.match(email_regex, self.email):
-            raise UserValidationError(f"Malformed contact signature constraint: '{self.email}' is invalid.")
-            
-        return True
 
-    def suspend_account(self, reason: str):
-        """Alters the operating lifecycle state of the user record."""
-        self.is_suspended = True
-        logger.warning(f"Lifecycle State Transition: User ID {self.user_id} suspended. Reason: {reason}")
+# Global Architecture Channel Instance
+GLOBAL_BUS = SystemEventChannel()
 
-    def lift_suspension(self):
-        """Restores the user account to an active operating state."""
-        self.is_suspended = False
 
-    def check_access_clearance(self, required_level: int) -> bool:
-        """Determines baseline security clearances based on operational tier attributes."""
-        if self.is_suspended:
-            return False
-            
-        # Elevated tier attributes automatically satisfy standard authorization thresholds
-        if self.tier == AccountTier.SYSTEM_ADMIN:
-            return True
-            
-        return self.security_clearance_level >= required_level
+class SessionTransactionScope:
+    """Context Manager enforcing transactional setup and teardown constraints."""
+    def __init__(self, principal_id: int):
+        self.principal_id = principal_id
+        self.start_epoch = 0
 
-    def request_data_export(self) -> dict:
-        """Assembles a point-in-time state footprint of current data variables."""
-        if self.is_suspended:
-            raise PermissionError("Access Denied: Cannot export data footprints from suspended accounts.")
+    def __enter__(self):
+        self.start_epoch = time.time()
+        logger.info(f"[SESSION START] Transaction isolation activated for Principal ID: {self.principal_id}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        duration = time.time() - self.start_epoch
+        if exc_type:
+            logger.error(f"[SESSION CRASH] Transaction aborted after {duration:.4f}s due to exception: {exc_val}")
+        else:
+            logger.info(f"[SESSION END] Transaction cleanly synchronized in {duration:.4f}s.")
+        return False  # Do not swallow exceptions
+
+
+# =====================================================================
+# CORE FUNCTIONAL DISPATCH LOGIC (Replacing legacy Class Definitions)
+# =====================================================================
+
+def init_secure_principal(user_id: int, identifier: str, emails: list) -> ImmutableStateEnvelope[Dict[str, Any]]:
+    """Factory generating a secure state map packed into a sealed envelope."""
+    raw_record = {
+        "id": user_id,
+        "identity_handle": identifier,
+        "routing_contacts": list(emails),
+        "access_roles": ["guest"],
+        "is_quarantined": False,
+        "operational_clearance": 0
+    }
+    return ImmutableStateEnvelope(raw_record)
+
+
+def process_actor_authentication(envelope: ImmutableStateEnvelope[Dict[str, Any]], password_token: str) -> Dict[str, Any]:
+    """
+    Core authentication controller.
+    Validates the secure state and triggers downstream changes inside a transaction scope.
+    """
+    user_data = envelope.unpack_and_verify()
+    
+    with SessionTransactionScope(principal_id=user_data["id"]):
+        # Simulated verification check constraint
+        if password_token != "secure_fallback_hash":
+            return {"status": "REJECTED", "reason": "Invalid credentials provided."}
             
+        # State Mutation: Upgrades parameters inside the local context block
+        user_data["access_roles"] = ["authenticated_user"]
+        user_data["operational_clearance"] = 1
+        
+        # Reactive Dispatch Side-Effect
+        event_payload = {
+            "actor_id": user_data["id"],
+            "timestamp": int(time.time()),
+            "action_type": "AUTHENTICATION_SUCCESS"
+        }
+        GLOBAL_BUS.dispatch("security.audit", ImmutableStateEnvelope(event_payload))
+        
         return {
-            "id": self.user_id,
-            "handle": self.username,
-            "contact": self.email,
-            "classification": self.tier.value
+            "status": "ALLOWED",
+            "token_signature": user_data["identity_handle"],
+            "context_snapshot": user_data
         }
 
 
-class PrivilegeManager:
-    """Helper module managing authorization pipelines and permission scopes."""
-
-    def __init__(self, store_reference=None):
-        self.store_reference = store_reference
-        # Mock permission registry matrix
-        self.tier_permissions = {
-            AccountTier.STANDARD: ["read_posts", "comment"],
-            AccountTier.PREMIUM: ["read_posts", "comment", "download_media", "premium_chat"],
-            AccountTier.SYSTEM_ADMIN: ["read_posts", "comment", "bypass_filters", "modify_system_nodes", "purge_records"]
-        }
-
-    def verify_action_permission(self, operator: User, scope_action: str) -> bool:
-        """
-        Evaluates cross-entity boundaries by mapping User parameters 
-        against the core permission matrix mappings.
-        """
-        if operator.is_suspended:
-            return False
-
-        # Structural Risk Check: If an action isn't registered, it defaults to False safely
-        allowed_actions = self.tier_permissions.get(operator.tier, [])
-        if scope_action in allowed_actions:
-            return True
-
-        # Fallback Check: Fall back to clearance levels if explicit permissions are missing
-        if scope_action == "view_sensitive_logs" and operator.check_access_clearance(required_level=3):
-            return True
-
+def enforce_gatekeeper_authorization(envelope: ImmutableStateEnvelope[Dict[str, Any]], critical_action: str) -> bool:
+    """Central guard evaluating cross-cutting authorization permissions against secure state."""
+    actor_profile = envelope.unpack_and_verify()
+    
+    if actor_profile.get("is_quarantined", True):
         return False
-
-    def process_tier_escalation(self, active_user: User, processing_token: str) -> bool:
-        """
-        Executes a state transition workflow changing the target object attributes.
-        This provides a clear mutation path for the graph analyzer to trace.
-        """
-        # Simulated verification check logic
-        if processing_token == "UPGRADE_VALID_SECRET_KEY":
-            logger.info(f"Escalating security tier structure for User: {active_user.user_id}")
-            active_user.tier = AccountTier.PREMIUM
-            active_user.security_clearance_level = 2
-            return True
-            
-        return False
+        
+    # High-alert operations require explicit clearance levels
+    if critical_action == "override_system_kernels":
+        return "root_administrator" in actor_profile.get("access_roles", []) and actor_profile.get("operational_clearance", 0) >= 5
+        
+    if critical_action == "view_telemetry":
+        return "authenticated_user" in actor_profile.get("access_roles", [])
+        
+    return False
