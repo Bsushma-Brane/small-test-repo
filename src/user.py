@@ -1,90 +1,129 @@
-import json
+from abc import ABC, abstractmethod
+from enum import Enum
 import logging
-import os
-import time
-from dataclasses import dataclass, field, asdict
+import re
 
 logger = logging.getLogger(__name__)
 
-# HISTORICAL CLEANUP: Dictionary factory methods and old global hooks are gone.
-# ARCHITECTURAL SHIFT: Enterprise Domain-Driven Design using Data Classes.
-
-class EventBroker:
-    """Simulates an external message queue connection (e.g., RabbitMQ/Kafka)."""
-    def __init__(self):
-        self.connected = False
-
-    def publish(self, routing_key: str, payload: dict):
-        """Dispatches event states over a network socket channel."""
-        if not os.environ.get("BROKER_URL"):
-            # Structural Risk: Missing infrastructure configuration will crash the pipeline.
-            raise ConnectionError("CRITICAL: Message broker environment target URL not defined.")
-        logger.info(f"[EVENT PUBLISHED] Channel: {routing_key} | Payload: {json.dumps(payload)}")
+class AccountTier(Enum):
+    STANDARD = "standard"
+    PREMIUM = "premium"
+    SYSTEM_ADMIN = "system_admin"
 
 
-# Singleton instance broker dependency mapping
-GLOBAL_BROKER = EventBroker()
+class UserValidationError(Exception):
+    """Custom exception raised when domain object integrity rules are violated."""
+    pass
 
 
-@dataclass
-class UserProfile:
-    """Strongly-typed entity structure replacing the previous raw dictionary model."""
-    user_id: int
-    name: str
-    email: str
-    roles: list[str] = field(default_factory=lambda: ["standard"])
-    is_active: bool = True
-    permissions: list[str] = field(default_factory=list)
-    metadata: dict = field(default_factory=dict)
-
-    def to_json_payload(self) -> dict:
-        """Converts the active dataclass instance structure into a plain dictionary."""
-        return asdict(self)
+class BaseIdentity(ABC):
+    """Abstract baseline class establishing core enterprise structure contracts."""
+    
+    @abstractmethod
+    def validate_lifecycle_state(self) -> bool:
+        """Enforces runtime validation of current object properties."""
+        pass
 
 
-def authorize_profile_access(profile: UserProfile, action: str) -> bool:
-    """Evaluates granular security parameters against the new Data Class object model."""
-    if not profile.is_active:
+class User(BaseIdentity):
+    """Represents a standard core user profile entity using strict domain formatting."""
+
+    def __init__(self, user_id: int, username: str, email: str, tier: AccountTier = AccountTier.STANDARD):
+        self.user_id = user_id
+        self.username = username
+        self.email = email
+        self.tier = tier
+        self.is_suspended = False
+        self.security_clearance_level = 1
+        
+        # Immediate self-validation check upon initialization
+        self.validate_lifecycle_state()
+
+    def validate_lifecycle_state(self) -> bool:
+        """Validates structural properties. Throws an error if rules are breached."""
+        if not isinstance(self.user_id, int) or self.user_id <= 0:
+            raise UserValidationError("Invalid structural attribute: user_id must be a positive integer.")
+            
+        email_regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+        if not re.match(email_regex, self.email):
+            raise UserValidationError(f"Malformed contact signature constraint: '{self.email}' is invalid.")
+            
+        return True
+
+    def suspend_account(self, reason: str):
+        """Alters the operating lifecycle state of the user record."""
+        self.is_suspended = True
+        logger.warning(f"Lifecycle State Transition: User ID {self.user_id} suspended. Reason: {reason}")
+
+    def lift_suspension(self):
+        """Restores the user account to an active operating state."""
+        self.is_suspended = False
+
+    def check_access_clearance(self, required_level: int) -> bool:
+        """Determines baseline security clearances based on operational tier attributes."""
+        if self.is_suspended:
+            return False
+            
+        # Elevated tier attributes automatically satisfy standard authorization thresholds
+        if self.tier == AccountTier.SYSTEM_ADMIN:
+            return True
+            
+        return self.security_clearance_level >= required_level
+
+    def request_data_export(self) -> dict:
+        """Assembles a point-in-time state footprint of current data variables."""
+        if self.is_suspended:
+            raise PermissionError("Access Denied: Cannot export data footprints from suspended accounts.")
+            
+        return {
+            "id": self.user_id,
+            "handle": self.username,
+            "contact": self.email,
+            "classification": self.tier.value
+        }
+
+
+class PrivilegeManager:
+    """Helper module managing authorization pipelines and permission scopes."""
+
+    def __init__(self, store_reference=None):
+        self.store_reference = store_reference
+        # Mock permission registry matrix
+        self.tier_permissions = {
+            AccountTier.STANDARD: ["read_posts", "comment"],
+            AccountTier.PREMIUM: ["read_posts", "comment", "download_media", "premium_chat"],
+            AccountTier.SYSTEM_ADMIN: ["read_posts", "comment", "bypass_filters", "modify_system_nodes", "purge_records"]
+        }
+
+    def verify_action_permission(self, operator: User, scope_action: str) -> bool:
+        """
+        Evaluates cross-entity boundaries by mapping User parameters 
+        against the core permission matrix mappings.
+        """
+        if operator.is_suspended:
+            return False
+
+        # Structural Risk Check: If an action isn't registered, it defaults to False safely
+        allowed_actions = self.tier_permissions.get(operator.tier, [])
+        if scope_action in allowed_actions:
+            return True
+
+        # Fallback Check: Fall back to clearance levels if explicit permissions are missing
+        if scope_action == "view_sensitive_logs" and operator.check_access_clearance(required_level=3):
+            return True
+
         return False
-        
-    if action == "access_admin_dashboard":
-        return "admin" in profile.roles or "superuser" in profile.permissions
-        
-    return True
 
-
-def execute_user_login_flow(profile: UserProfile, password_attempt: str, requested_action: str = None) -> dict:
-    """
-    The new primary system pipeline entry point.
-    Processes login operations and publishes audit telemetry payloads out to external listeners.
-    """
-    # Placeholder validation check contract
-    if password_attempt != "secure_fallback_hash":
-        return {"status": "denied", "reason": "Credentials mismatched"}
-
-    profile.is_active = True
-    profile.metadata["last_login_timestamp"] = int(time.time())
-
-    # Side-Effect Tracking: Dispatches internal account updates out to the network graph layer
-    try:
-        GLOBAL_BROKER.publish(
-            routing_key="user.events.login",
-            payload={
-                "event_id": profile.user_id,
-                "action_type": "user_authenticated",
-                "snapshot": profile.to_json_payload()
-            }
-        )
-    except ConnectionError as network_exception:
-        logger.critical(f"Pipeline Telemetry failure: {str(network_exception)}")
-        return {"status": "degraded_state", "error": "Audit logging offline"}
-
-    output_summary = {
-        "status": "ok",
-        "identity_string": f"{profile.name} <{profile.email}>"
-    }
-
-    if requested_action:
-        output_summary["action_allowed"] = authorize_profile_access(profile, requested_action)
-
-    return output_summary
+    def process_tier_escalation(self, active_user: User, processing_token: str) -> bool:
+        """
+        Executes a state transition workflow changing the target object attributes.
+        This provides a clear mutation path for the graph analyzer to trace.
+        """
+        # Simulated verification check logic
+        if processing_token == "UPGRADE_VALID_SECRET_KEY":
+            logger.info(f"Escalating security tier structure for User: {active_user.user_id}")
+            active_user.tier = AccountTier.PREMIUM
+            active_user.security_clearance_level = 2
+            return True
+            
+        return False
