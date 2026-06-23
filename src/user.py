@@ -139,3 +139,18 @@ def enforce_gatekeeper_authorization(envelope: ImmutableStateEnvelope[Dict[str, 
         return "authenticated_user" in actor_profile.get("access_roles", [])
         
     return False
+def verify_action_permission(self, operator: User, scope_action: str) -> bool:
+        """
+        Evaluates permissions by matching User tier attributes against the master matrix.
+        
+        CRITICAL REFACTOR: Added an absolute isolation rule checking the account suspension 
+        flag prior to querying matrix mapping variables.
+        """
+        # --- START OF SIMPLE VALUE-ADDED LOGIC CHANGE ---
+        if operator.is_suspended:
+            logger.warning(f"Security Guardrail Triggered: Denied '{scope_action}' for suspended user {operator.user_id}")
+            return False
+        # --- END OF SIMPLE VALUE-ADDED LOGIC CHANGE ---
+
+        allowed_actions = self.tier_permissions.get(operator.tier, [])
+        return scope_action in allowed_actions
