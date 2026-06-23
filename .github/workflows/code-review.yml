@@ -1,4 +1,4 @@
-name: Code Review Graph Analysis
+name: Git Analyser — Qwen AI Code Review
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  review:
+  qwen-review:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR code
@@ -17,150 +17,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run code-review-graph
-        uses: tirth8205/code-review-graph@v2.3.6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -q openai code-review-graph
+        run: pip install -q "code-review-graph>=2.3.6" openai requests
 
-      - name: Build graph and detect changes
+      - name: Build code-review-graph
+        run: code-review-graph build . 2>&1 || true
+
+      - name: Detect changes and export risk JSON
         run: |
-          git fetch origin ${{ github.base_ref }}
-          code-review-graph build
-          code-review-graph detect-changes --base "origin/${{ github.base_ref }}" > /tmp/crg-report.json || echo "{}" > /tmp/crg-report.json
+          git fetch origin ${{ github.base_ref }} --depth=50 2>/dev/null || true
+          code-review-graph detect-changes --base "origin/${{ github.base_ref }}" --format json > /tmp/crg-report.json 2>/dev/null || echo '{"risk_score":0,"changed_functions":[],"affected_flows":[],"test_gaps":[],"review_priorities":[]}' > /tmp/crg-report.json
           cat /tmp/crg-report.json
 
-      - name: Write Qwen analysis script
-        run: |
-          cat > /tmp/qwen_analysis.py << 'PYEOF'
-import json, os, time, urllib.request
-from openai import OpenAI
-
-report = json.load(open("/tmp/crg-report.json"))
-api_key = os.environ.get("QWEN_API_KEY", "")
-pr_number = os.environ.get("PR_NUMBER", "")
-repo = os.environ.get("GITHUB_REPOSITORY", "")
-token = os.environ.get("GH_TOKEN", "")
-
-if not api_key:
-    print("No QWEN_API_KEY set - skipping")
-    exit(0)
-
-score = float(report.get("risk_score") or 0)
-changed = report.get("changed_functions") or []
-gaps = report.get("test_gaps") or []
-top10 = (report.get("review_priorities") or changed)[:10]
-
-func_lines = "\n".join(
-    f"  - {fn.get('qualified_name') or fn.get('name')} risk={float(fn.get('risk_score') or 0):.2f}"
-    for fn in top10
-)
-gap_lines = "\n".join(
-    f"  - {g.get('qualified_name') or g.get('name')}"
-    for g in gaps[:10]
-)
-
-raw_sources = {}
-for fn in top10:
-    fp = fn.get("file_path") or fn.get("file") or ""
-    if fp and fp not in raw_sources:
-        try:
-            raw_sources[fp] = open(fp).read()[:3000]
-        except Exception:
-            pass
-
-source_block = "\n\n".join(
-    f"File: {fp}\n```python\n{src}\n```"
-    for fp, src in list(raw_sources.items())[:3]
-)
-
-prompt = f"""You are a senior software architect reviewing a Pull Request.
-
-code-review-graph results:
-- Overall risk score: {score:.2f}
-- Changed functions ({len(changed)} total):
-{func_lines or "  none"}
-- Test gaps (no coverage):
-{gap_lines or "  none"}
-
-Source code:
-{source_block or "  (not available)"}
-
-Write a PR review with these exact sections:
-
-## Qwen AI Functional Analysis
-
-### What Changed
-### Potential Risks
-### Blast Radius
-### Recommended Test Cases
-### Verdict (APPROVE / REQUEST CHANGES / NEEDS REVIEW)
-
-Be specific, reference function names. Under 600 words."""
-
-client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-
-MODELS = [
-    "qwen/qwen3-coder:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
-]
-
-analysis = None
-for model in MODELS:
-    for attempt in range(3):
-        try:
-            print(f"Trying {model} attempt {attempt+1}")
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a senior software architect."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=1500
-            )
-            analysis = resp.choices[0].message.content.strip()
-            print(f"Success: {model}")
-            break
-        except Exception as e:
-            print(f"Error {model}: {e}")
-            if "429" in str(e):
-                time.sleep(35)
-            else:
-                break
-    if analysis:
-        break
-
-if not analysis:
-    analysis = "Qwen AI analysis could not be completed - all models rate limited."
-
-body = "<!-- qwen-analysis -->\n" + analysis + "\n\n---\n*Powered by Qwen AI + code-review-graph*"
-req = urllib.request.Request(
-    f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
-    data=json.dumps({"body": body}).encode(),
-    headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json"
-    },
-    method="POST"
-)
-with urllib.request.urlopen(req) as r:
-    result = json.loads(r.read())
-    print(f"Comment posted: {result.get('html_url')}")
-PYEOF
-
-      - name: Run Qwen AI Analysis
+      - name: Run Qwen AI analysis and post PR comment
         env:
           QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python /tmp/qwen_analysis.py
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 .github/scripts/qwen_review.py
