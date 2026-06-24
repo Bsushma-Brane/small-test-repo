@@ -1,5 +1,25 @@
 # src/main.py
 from user import User, Admin
+from fastapi import FastAPI
+from user import User, Admin
+
+app = FastAPI()
+
+
+@app.post("/login")
+def login_endpoint(user_id: int, name: str, email: str, password: str, department: str = None, action: str = None):
+    if department:
+        user = Admin(user_id, name, email, department)
+    else:
+        user = User(user_id, name, email)
+    return user.process_login(password, action=action)
+
+
+@app.post("/admin/{action}")
+def admin_action_endpoint(action: str, admin: Admin, permission_updates: list = None):
+    if permission_updates:
+        admin.grant_all_permissions(permission_updates)
+    return {"allowed": admin.authorize(action)}
 
 def login_handler(user_id: int, name: str, email: str, password: str, department: str = None, action: str = None):
     if department:
