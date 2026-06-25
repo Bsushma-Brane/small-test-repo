@@ -1,0 +1,139 @@
+# ============================================================
+# Place this file at: .github/workflows/deploy-pagerduty.yml
+# ============================================================
+# Purpose: simulate a deploy and prove PagerDuty can detect it
+#          via API (Change Events for deploy start/success,
+#          Events API v2 for failure alerts).
+#
+# Uses your existing repo secrets:
+#   PD_ROUTING_KEY  -> Events API v2 key (triggers/resolves incidents)
+#   PD_CHANGE_KEY   -> Change Events key (deploy start/success markers)
+#
+# How to test:
+#   1. Push to main -> runs automatically, deploy step succeeds.
+#   2. Go to Actions tab -> "Deploy with PagerDuty Tracking" ->
+#      "Run workflow" -> set force_fail = true -> Run.
+#      This simulates a failed deploy and should fire a CRITICAL
+#      incident in PagerDuty.
+#   3. Run it again with force_fail = false to see the
+#      auto-resolve + "Deploy SUCCEEDED" change event.
+# ============================================================
+
+name: Deploy with PagerDuty Tracking
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: "Force the deploy step to fail (for testing PagerDuty alerts)"
+        type: boolean
+        default: false
+
+env:
+  REPO: ${{ github.repository }}
+  SHA: ${{ github.sha }}
+  BRANCH: ${{ github.ref_name }}
+  ACTOR: ${{ github.actor }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── PagerDuty Change Event: deploy kicked off ──
+      - name: "PagerDuty: notify deploy started"
+        run: |
+          curl -s -X POST https://events.pagerduty.com/v2/change/enqueue \
+            -H "Content-Type: application/json" \
+            -d '{
+              "routing_key": "${{ secrets.PD_CHANGE_KEY }}",
+              "payload": {
+                "summary": "Deploy STARTED: ${{ env.REPO }} @ ${{ env.SHA }}",
+                "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
+                "source": "GitHub Actions",
+                "custom_details": {
+                  "repo": "${{ env.REPO }}",
+                  "branch": "${{ env.BRANCH }}",
+                  "commit_sha": "${{ env.SHA }}",
+                  "author": "${{ env.ACTOR }}",
+                  "workflow_run_url": "${{ env.RUN_URL }}"
+                }
+              }
+            }'
+
+      # ── Simulated deploy — swap this for real deploy commands later ──
+      - name: Run deploy (simulated)
+        id: deploy
+        run: |
+          echo "Deploying ${{ env.REPO }} @ ${{ env.SHA }} ..."
+          if [ "${{ inputs.force_fail }}" = "true" ]; then
+            echo "force_fail=true -> simulating a failed deploy"
+            exit 1
+          fi
+          echo "Deploy finished successfully."
+        continue-on-error: true
+
+      # ── PagerDuty: CRITICAL incident on failure ──
+      - name: "PagerDuty: trigger alert on deploy failure"
+        if: steps.deploy.outcome == 'failure'
+        run: |
+          curl -s -X POST https://events.pagerduty.com/v2/enqueue \
+            -H "Content-Type: application/json" \
+            -d '{
+              "routing_key": "${{ secrets.PD_ROUTING_KEY }}",
+              "event_action": "trigger",
+              "dedup_key": "deploy-failed-${{ env.REPO }}-${{ env.BRANCH }}",
+              "payload": {
+                "summary": "[DEPLOY FAILED] ${{ env.REPO }} @ ${{ env.BRANCH }}",
+                "severity": "critical",
+                "source": "GitHub Actions",
+                "component": "Deploy",
+                "class": "deploy_failure",
+                "custom_details": {
+                  "repo": "${{ env.REPO }}",
+                  "branch": "${{ env.BRANCH }}",
+                  "commit_sha": "${{ env.SHA }}",
+                  "author": "${{ env.ACTOR }}",
+                  "workflow_run_url": "${{ env.RUN_URL }}"
+                }
+              },
+              "links": [{"href": "${{ env.RUN_URL }}", "text": "View Failed Run"}]
+            }'
+
+      # ── PagerDuty: success change event + auto-resolve any open incident ──
+      - name: "PagerDuty: notify deploy succeeded"
+        if: steps.deploy.outcome == 'success'
+        run: |
+          curl -s -X POST https://events.pagerduty.com/v2/change/enqueue \
+            -H "Content-Type: application/json" \
+            -d '{
+              "routing_key": "${{ secrets.PD_CHANGE_KEY }}",
+              "payload": {
+                "summary": "Deploy SUCCEEDED: ${{ env.REPO }} @ ${{ env.SHA }}",
+                "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
+                "source": "GitHub Actions",
+                "custom_details": {
+                  "repo": "${{ env.REPO }}",
+                  "branch": "${{ env.BRANCH }}",
+                  "commit_sha": "${{ env.SHA }}",
+                  "workflow_run_url": "${{ env.RUN_URL }}"
+                }
+              }
+            }'
+
+          curl -s -X POST https://events.pagerduty.com/v2/enqueue \
+            -H "Content-Type: application/json" \
+            -d '{
+              "routing_key": "${{ secrets.PD_ROUTING_KEY }}",
+              "event_action": "resolve",
+              "dedup_key": "deploy-failed-${{ env.REPO }}-${{ env.BRANCH }}"
+            }'
+
+      - name: Fail job if deploy failed
+        if: steps.deploy.outcome == 'failure'
+        run: exit 1
